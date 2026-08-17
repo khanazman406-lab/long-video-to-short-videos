@@ -1,0 +1,26 @@
+{
+  "name": "long-video-to-short-videos",
+  "version": "1.0.0",
+  "description": "Convert long videos to short videos - TikTok, Instagram Reels, YouTube Shorts",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm start",
+    "client": "cd client && npm run dev",
+    "build": "cd client && npm run build",
+    "start": "cd server && node index.js"
+  },
+  "keywords": [
+    "video",
+    "trimmer",
+    "short-videos",
+    "tiktok",
+    "instagram-reels",
+    "youtube-shorts"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

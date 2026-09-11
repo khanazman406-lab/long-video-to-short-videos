@@ -1,0 +1,60 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://clipforge:clipforge@db:5432/clipforge
+      DATA_DIR: /data
+    volumes:
+      - clipforge-data:/data
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    build: ./backend
+    # Same image; override command when running dedicated Redis workers.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://clipforge:clipforge@db:5432/clipforge
+      USE_REDIS_QUEUE: "true"
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /data
+    volumes:
+      - clipforge-data:/data
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clipforge
+      POSTGRES_PASSWORD: clipforge
+      POSTGRES_DB: clipforge
+    volumes:
+      - clipforge-db:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - clipforge-redis:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  clipforge-data:
+  clipforge-db:
+  clipforge-redis:

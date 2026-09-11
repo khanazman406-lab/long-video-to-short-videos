@@ -1,0 +1,24 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Backend venv + runtime data (uploads, db, renders)
+backend/.venv/
+backend/data/
+backend/tests/.tmp/
+*.db
+*.db-journal
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS / editors
+.DS_Store
+*.swp
+.vscode/
+.idea/

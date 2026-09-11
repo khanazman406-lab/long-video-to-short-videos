@@ -1,0 +1,18 @@
+# ClipForge AI — backend dependencies
+# Core API
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+python-multipart>=0.0.9,<1.0
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+# Database (SQLite by default, PostgreSQL in production via DATABASE_URL)
+SQLAlchemy>=2.0,<3.0
+# Computer vision / audio / image
+numpy>=1.26,<2.0
+opencv-python-headless>=4.9,<5.0
+Pillow>=10.2,<11.0
+# Bundled FFmpeg binary (used when no system ffmpeg is installed)
+imageio-ffmpeg>=0.4.9,<1.0
+# Testing
+pytest>=8.0,<9.0
+httpx>=0.27,<1.0

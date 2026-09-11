@@ -10,24 +10,43 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from .api import clips, exports, health, videos
 from .config import get_settings
 from .db import init_db
 from .utils.logging import get_logger, setup_logging
+from .utils.spa import mount_frontend
 
 setup_logging()
 logger = get_logger(__name__)
-settings = get_settings()
 
 
 def create_app() -> FastAPI:
+    # Read settings per app (not at import time) so a test/process that adjusts
+    # the environment before create_app() gets exactly what it asks for.
+    settings = get_settings()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001
         settings.ensure_data_dirs()
-        init_db()
-        logger.info("%s starting (data_dir=%s)", settings.app_name, settings.data_dir)
+        # Managed Postgres can lag the app by a few seconds on a fresh deploy;
+        # retry briefly instead of crash-looping the container.
+        for attempt in range(1, 6):
+            try:
+                init_db()
+                break
+            except Exception as exc:  # pragma: no cover - infra-dependent path
+                if attempt == 5 or not settings.is_postgres:
+                    raise
+                logger.warning("database not ready (%s); retrying in %ds", exc, attempt * 3)
+                time.sleep(attempt * 3)
+        logger.info(
+            "%s starting (data_dir=%s, db=%s, frontend=%s)",
+            settings.app_name,
+            settings.data_dir,
+            "postgres" if settings.is_postgres() else "sqlite",
+            "mounted" if settings.resolved_frontend_dist() else "api-only",
+        )
         yield
 
     app = FastAPI(
@@ -90,13 +109,10 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=404, content={"detail": "Thumbnail not found."})
         return FileResponse(path, media_type="image/jpeg")
 
-    # Serve the built frontend when it exists (single-process deployment).
-    dist = Path(__file__).resolve().parent.parent.parent.parent / "frontend" / "dist"
-    frontend_dist = Path(data_dir).parent / "frontend_dist"
-    for candidate in (dist, frontend_dist):
-        if candidate.exists():
-            app.mount("/", StaticFiles(directory=candidate, html=True), name="frontend")
-            break
+    # Serve the built SPA when frontend/dist exists, so one container (or one
+    # `uvicorn` process) is the whole app. Unknown paths fall back to
+    # index.html so React Router deep links work; /api/* stays a JSON 404.
+    mount_frontend(app, settings.resolved_frontend_dist())
 
     return app
 

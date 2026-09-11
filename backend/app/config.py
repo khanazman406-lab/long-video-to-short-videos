@@ -19,6 +19,41 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 
+# Used whenever DATABASE_URL is empty/blank (local dev, container with no DB yet).
+DEFAULT_SQLITE_URL = f"sqlite:///{BACKEND_DIR / 'data' / 'clipforge.db'}"
+
+
+def normalize_database_url(url: str | None) -> str:
+    """Return a SQLAlchemy-compatible database URL.
+
+    Managed platforms (Render, Railway, Neon, Supabase, Heroku, Docker ``--link``)
+    hand out libpq-style URLs such as ``postgres://user:pass@host:5432/db``.
+    SQLAlchemy 2.x rejects the ``postgres://`` compatibility scheme and wants an
+    explicit dialect+driver, so rewrite it to ``postgresql+psycopg2://``
+    (``psycopg2-binary`` is installed by ``requirements.txt``).
+
+    Rules:
+      * empty / blank / ``""``  -> local SQLite file (so a copied `.env.example`
+        with ``DATABASE_URL=`` keeps working)
+      * ``postgres://``         -> ``postgresql+psycopg2://``
+      * ``postgresql://``       -> ``postgresql+psycopg2://``
+      * anything with an explicit ``+driver`` (``postgresql+asyncpg``,
+        ``sqlite``, ``mysql+pymysql``...) is passed through untouched
+      * query strings (``?sslmode=require``) and credentials are preserved
+
+    Trimming quotes matters because several dashboards paste values with them.
+    """
+    raw = (url or "").strip().strip("'\"").strip()
+    if not raw:
+        return DEFAULT_SQLITE_URL
+    scheme, sep, rest = raw.partition("://")
+    if not sep or not rest:
+        return raw  # not a URL we understand; let SQLAlchemy complain loudly
+    scheme = scheme.strip().lower()
+    if scheme in ("postgres", "postgresql", "postgres+psycopg2"):
+        scheme = "postgresql+psycopg2"
+    return f"{scheme}://{rest}"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -42,10 +77,12 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="*", alias="CORS_ORIGINS")
 
     # --- Database (SQLite default, PostgreSQL for production) ---
-    database_url: str = Field(
-        default=f"sqlite:///{BACKEND_DIR / 'data' / 'clipforge.db'}",
-        alias="DATABASE_URL",
-    )
+    # Accepts libpq-style URLs (postgres://...) from Render/Railway/Heroku and
+    # normalizes them to postgresql+psycopg2:// (see normalize_database_url).
+    database_url: str = Field(default=DEFAULT_SQLITE_URL, alias="DATABASE_URL")
+
+    # --- Static frontend (single-image deployments serve frontend/dist) ---
+    frontend_dist: str = Field(default="", alias="FRONTEND_DIST")
 
     # --- Queue (optional Redis/RQ; falls back to in-process worker pool) ---
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
@@ -124,6 +161,12 @@ class Settings(BaseSettings):
             return ",".join(v)
         return v
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_db_url(cls, v):
+        """Accept ``postgres://`` (and friends) from any PaaS, store a real SQLAlchemy URL."""
+        return normalize_database_url(v if isinstance(v, str) or v is None else str(v))
+
     def cors_origin_list(self) -> list[str]:
         if self.cors_origins.strip() == "*":
             return ["*"]
@@ -151,6 +194,33 @@ class Settings(BaseSettings):
                 "visual_change": 0.10,
                 "transcript_signal": 0.05,
             }
+
+    def is_postgres(self) -> bool:
+        return self.database_url.startswith("postgresql")
+
+    def resolved_frontend_dist(self) -> Path | None:
+        """Locate the built SPA to serve, or None when only the API is deployed.
+
+        Search order: explicit ``FRONTEND_DIST`` -> ``<repo>/frontend/dist``
+        (local dev + the multi-stage Docker image) -> ``<backend>/frontend/dist``
+        -> ``<DATA_DIR>/../frontend_dist`` -> ``/frontend/dist`` (alt images).
+        A candidate only wins if it actually contains ``index.html``.
+        """
+        explicit = self.frontend_dist.strip()
+        candidates: list[Path] = []
+        if explicit:
+            candidates.append(Path(explicit).expanduser())
+        else:
+            candidates += [
+                REPO_ROOT / "frontend" / "dist",
+                BACKEND_DIR / "frontend" / "dist",
+                Path(self.data_dir).parent / "frontend_dist",
+                Path("/frontend/dist"),
+            ]
+        for candidate in candidates:
+            if (candidate / "index.html").is_file():
+                return candidate
+        return None
 
     def ensure_data_dirs(self) -> None:
         for sub in ("uploads", "thumbnails", "exports", "temp", "waveforms"):

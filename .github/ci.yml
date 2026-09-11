@@ -1,0 +1,217 @@
+# ClipForge AI — CI pipeline.
+#
+# GitHub only runs workflows that live in .github/workflows/, and a token
+# without the "Workflows: write" permission cannot push into that directory, so
+# this file is versioned one level up. Activate it once with:
+#
+#     git mv .github/ci.yml .github/workflows/ci.yml
+#     git commit -m "ci: activate GitHub Actions workflow"
+#     git push
+#
+# (Do this from an account that owns the repo, or grant the deploying GitHub App
+# the Workflows permission and re-run the push.)
+name: CI
+
+# Backend tests, frontend typecheck+build, deploy-config validation and a real
+# `docker build` of the root Dockerfile with a smoke test of the running image
+# (that is the exact artifact Render/Railway build). Pushes to main and PRs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install ffmpeg (system)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile the package (fast import/syntax gate)
+        run: python -m compileall -q app
+
+      - name: Run tests
+        env:
+          TRANSCRIPT_ENABLED: "false"
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: Frontend (tsc + vite build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build (runs `tsc --noEmit` first)
+        env:
+          VITE_API_URL: ""
+        run: npm run build
+
+      - name: Assert the bundle was produced
+        run: |
+          test -s dist/index.html
+          ls -la dist dist/assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy-config:
+    name: Deploy config (render.yaml, railway.json, compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate deploy manifests
+        run: |
+          python -m pip install --quiet "PyYAML>=6"
+          python - <<'PY'
+          import json, pathlib, sys
+          import yaml
+
+          ok = True
+          for name in ("render.yaml", "docker-compose.yml"):
+              path = pathlib.Path(name)
+              try:
+                  doc = yaml.safe_load(path.read_text())
+                  assert isinstance(doc, dict) and doc, f"{name} is empty"
+                  print(f"ok   {name}")
+              except Exception as exc:
+                  ok = False
+                  print(f"FAIL {name}: {exc}")
+
+          for name in ("railway.json", "package.json", "frontend/package.json"):
+              path = pathlib.Path(name)
+              try:
+                  doc = json.loads(path.read_text())
+                  assert doc, f"{name} is empty"
+                  print(f"ok   {name}")
+              except Exception as exc:
+                  ok = False
+                  print(f"FAIL {name}: {exc}")
+
+          rail = json.loads(pathlib.Path("railway.json").read_text())
+          assert rail["build"]["builder"] == "DOCKERFILE", "railway.json must build via Dockerfile"
+          assert pathlib.Path(rail["build"]["dockerfilePath"]).is_file(), "Dockerfile path is wrong"
+          assert rail["deploy"]["healthcheckPath"] == "/api/health", "railway healthcheck path"
+
+          render = yaml.safe_load(pathlib.Path("render.yaml").read_text())
+          web = next(s for s in render["services"] if s["type"] == "web")
+          assert web["runtime"] == "docker" and web["dockerfilePath"] == "./Dockerfile"
+          assert web["healthCheckPath"] == "/api/health"
+          assert web["disk"]["mountPath"] == "/data"
+          assert any(d["name"] == "clipforge-db" for d in render["databases"]), "missing postgres"
+          assert any(s["type"] == "redis" for s in render["services"]), "missing redis"
+          assert pathlib.Path(web["dockerfilePath"]).is_file(), "Dockerfile path is wrong"
+
+          sys.exit(0 if ok else 1)
+          PY
+
+  docker:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [backend, frontend, deploy-config]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the deploy image
+        run: docker build -t clipforge-ci .
+
+      - name: Start it (API + SPA on one port)
+        run: |
+          mkdir -p "$RUNNER_TEMP/clipforge-data"
+          docker run -d --name clipforge \
+            -p 8000:8000 \
+            -v "$RUNNER_TEMP/clipforge-data:/data" \
+            -e TRANSCRIPT_ENABLED=false \
+            -e DATA_DIR=/data \
+            clipforge-ci
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8000/api/health >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          test "${ready:-0}" = "1" || { docker logs --tail 200 clipforge; exit 1; }
+
+      - name: Check health, SPA fallback and JSON API 404
+        run: |
+          echo "--- /api/health"
+          curl -fsS http://127.0.0.1:8000/api/health | tee "$RUNNER_TEMP/health.json"
+          grep -q '"ffmpeg":true' "$RUNNER_TEMP/health.json"
+          grep -q '"database":true' "$RUNNER_TEMP/health.json"
+
+          echo "--- / and a client-side route must return the SPA shell"
+          for path in / /results /editor/00000000-0000-0000-0000-000000000000; do
+            code=$(curl -s -o "$RUNNER_TEMP/page.html" -w '%{http_code}' "http://127.0.0.1:8000$path")
+            test "$code" = "200" || { echo "GET $path -> $code"; exit 1; }
+            grep -q '<div id="root">' "$RUNNER_TEMP/page.html" || { echo "GET $path is not the SPA"; exit 1; }
+          done
+
+          echo "--- hashed assets are served with immutable caching"
+          asset=$(docker exec clipforge sh -c 'ls /app/frontend/dist/assets | grep "\.js$" | head -1')
+          test -n "$asset" || { echo "no JS asset in image"; exit 1; }
+          curl -fsS -D "$RUNNER_TEMP/asset.headers" -o /dev/null "http://127.0.0.1:8000/assets/$asset"
+          grep -qi 'cache-control:.*immutable' "$RUNNER_TEMP/asset.headers"
+
+          echo "--- unknown API routes stay JSON 404 (never the SPA shell)"
+          code=$(curl -s -o "$RUNNER_TEMP/api.json" -w '%{http_code}' http://127.0.0.1:8000/api/nope)
+          test "$code" = "404" || { echo "GET /api/nope -> $code"; exit 1; }
+          grep -q '"detail"' "$RUNNER_TEMP/api.json"
+
+          echo "--- uploads land on the mounted volume"
+          curl -fsS -o /dev/null http://127.0.0.1:8000/api/docs
+          docker exec clipforge test -d /data/uploads
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs --tail 300 clipforge

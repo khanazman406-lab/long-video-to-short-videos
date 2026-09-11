@@ -5,8 +5,11 @@ uvicorn[standard]>=0.29,<1.0
 python-multipart>=0.0.9,<1.0
 pydantic>=2.6,<3.0
 pydantic-settings>=2.2,<3.0
-# Database (SQLite by default, PostgreSQL in production via DATABASE_URL)
+# Database (SQLite by default, PostgreSQL in production via DATABASE_URL.
+# psycopg2-binary is prebuilt, so `runtime: docker` / Railway / Render images
+# need no pg_config or libpq-dev; postgres:// URLs are normalized in config.py.)
 SQLAlchemy>=2.0,<3.0
+psycopg2-binary>=2.9.9,<3.0
 # Computer vision / audio / image
 numpy>=1.26,<2.0
 opencv-python-headless>=4.9,<5.0

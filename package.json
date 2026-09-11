@@ -8,6 +8,10 @@
     "server": "cd backend && .venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
     "client": "cd frontend && npm run dev",
     "build": "cd frontend && npm run build",
+    "start": "cd backend && .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}",
+    "start:single": "npm run build && npm run start",
+    "docker:build": "docker build -t clipforge-ai .",
+    "docker:run": "docker run --rm -p 8000:8000 -v clipforge-data:/data clipforge-ai",
     "install:all": "cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && cd ../frontend && npm install",
     "test": "cd backend && .venv/bin/python -m pytest tests/ -x -q"
   },

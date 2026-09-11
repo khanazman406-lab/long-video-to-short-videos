@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ClipForge AI — Render Blueprint (web + Postgres + Redis + persistent disk).
+#
+# Dashboard: New + → Blueprint → connect this repo → Render reads this file.
+# CLI:       render blueprints launch   (or `render blueprints sync`)
+#
+# The web service builds the root `Dockerfile` (node SPA build → python + ffmpeg)
+# and serves the API and the built frontend on one port, so no CORS or second
+# static-host service is needed. `/data` is a persistent disk: uploads,
+# thumbnails and exported MP4s survive redeploys.
+#
+# Plans below are the cheapest that work. Postgres `free` expires after 30 days
+# and the starter instance is small — see README §15.4 for the sizes to use once
+# real people upload real video.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: clipforge-ai
+    runtime: docker # root Dockerfile; no build/start commands needed
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter # disks + ffmpeg headroom require a paid instance type
+    region: oregon
+    branch: main
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    maxShutdownDelaySeconds: 120 # let in-flight renders finish before the SIGKILL
+    numInstances: 1
+    envVars:
+      # Render gives a libpq URL (postgres://...). app/config.py rewrites it to
+      # postgresql+psycopg2:// so SQLAlchemy 2 accepts it — no manual editing.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: clipforge-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: clipforge-redis
+          property: connectionString
+      # Jobs run in-process on one instance (simplest reliable topology). Flip
+      # to "true" only once you also run a worker process (README §15.5 + §9).
+      - key: USE_REDIS_QUEUE
+        value: "false"
+      - key: WORKER_CONCURRENCY
+        value: "1"
+      - key: DATA_DIR
+        value: /data
+      # Video work is heavy and the disk is 5 GB: cap uploads, keep retention
+      # short, and skip transcripts until you add a bigger instance.
+      - key: MAX_UPLOAD_SIZE
+        value: "524288000"
+      - key: MAX_VIDEO_DURATION
+        value: "3600"
+      - key: RETENTION_DAYS
+        value: "7"
+      - key: CLEANUP_TEMP_FILES
+        value: "true"
+      - key: TRANSCRIPT_ENABLED
+        value: "false"
+      - key: DEFAULT_NUM_CLIPS
+        value: "5"
+      - key: CORS_ORIGINS
+        value: "*" # same-origin app; tighten to https://<name>.onrender.com if you split FE/BE
+      - key: APP_NAME
+        value: ClipForge AI
+      - key: APP_TAGLINE
+        value: Turn long videos into your best short clips automatically.
+    disk:
+      name: clipforge-media
+      mountPath: /data
+      sizeGB: 5
+
+  # Redis-backed queue (optional). Free tier is 25 MB / no persistence, which is
+  # plenty for job hand-off; paid tiers add persistence + eviction policies.
+  - type: redis
+    name: clipforge-redis
+    plan: free
+    region: oregon
+    maxmemoryPolicy: noeviction
+    ipAllowList: [] # internal network only
+
+databases:
+  - name: clipforge-db
+    databaseName: clipforge
+    user: clipforge
+    plan: free # upgrade to basic-256mb before the 30-day expiry
+    region: oregon
+    postgresMajorVersion: 16
+    ipAllowList: [] # internal network only
